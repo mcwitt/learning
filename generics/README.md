@@ -1,0 +1,1 @@
+- [Datatype-generic programming in Haskell](https://github.com/well-typed/gp-zurihac-2020)
