@@ -6,7 +6,7 @@
 module Main where
 
 import Control.DeepSeq (NFData)
-import Control.Monad (forM_, replicateM)
+import Control.Monad (foldM, forM_, replicateM)
 import Control.Monad.Primitive (PrimMonad)
 import Control.Monad.ST (ST, runST)
 import Control.Monad.State
@@ -18,6 +18,7 @@ import Control.Monad.State
 import Criterion.Main (bench, bgroup, defaultMain, nfIO)
 import Data.Functor ((<&>))
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
+import Data.List (foldl')
 import Data.STRef (STRef, modifySTRef, newSTRef, readSTRef)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -52,11 +53,11 @@ prune :: Tree Vertex -> Tree Vertex
 prune = fst . flip clip Set.empty
 
 clip :: Tree Vertex -> Set Vertex -> (Tree Vertex, Set Vertex)
-clip (Node l xs) visited = (Node l xs1, visited1)
+clip (Node l xs) visited = (Node l (reverse rxs1), visited1)
   where
-    (xs1, visited1) =
-      foldr
-        ( \x'@(Node l' _) z@(xs', visited') ->
+    (rxs1, visited1) =
+      foldl'
+        ( \z@(xs', visited') x'@(Node l' _) ->
             if l' `Set.notMember` visited'
               then let (x'', visited'') = clip x' visited' in (x'' : xs', visited'')
               else z
@@ -70,10 +71,17 @@ pruneState = flip evalState Set.empty . clipState
 clipState :: Tree Vertex -> State (Set Vertex) (Tree Vertex)
 clipState (Node l xs) = do
   modify (Set.insert l)
-  visited <- get
-  let unvistedNodes = filter (\(Node l' _) -> l' `Set.notMember` visited) xs
-  xs' <- mapM clipState unvistedNodes
-  return (Node l xs')
+  xs' <-
+    foldM
+      ( \z x@(Node l' _) ->
+          get >>= \visited ->
+            if l' `Set.notMember` visited
+              then clipState x <&> (: z)
+              else pure z
+      )
+      []
+      xs
+  pure $ Node l (reverse xs')
 
 pruneST :: Tree Vertex -> Tree Vertex
 pruneST t = runST $ newSTRef Set.empty >>= flip clipST t
@@ -81,10 +89,17 @@ pruneST t = runST $ newSTRef Set.empty >>= flip clipST t
 clipST :: STRef s (Set Vertex) -> Tree Vertex -> ST s (Tree Vertex)
 clipST visitedRef (Node l xs) = do
   modifySTRef visitedRef (Set.insert l)
-  visited <- readSTRef visitedRef
-  let unvistedNodes = filter (\(Node l' _) -> l' `Set.notMember` visited) xs
-  xs' <- mapM (clipST visitedRef) unvistedNodes
-  return (Node l xs')
+  xs' <-
+    foldM
+      ( \z x@(Node l' _) ->
+          readSTRef visitedRef >>= \visited ->
+            if l' `Set.notMember` visited
+              then clipST visitedRef x <&> (: z)
+              else pure z
+      )
+      []
+      xs
+  pure $ Node l (reverse xs')
 
 dfsIO :: (Tree Vertex -> IO (Tree Vertex)) -> Graph -> Vertex -> IO (Tree Vertex)
 dfsIO pruneImpl g = pruneImpl . generate g
@@ -95,26 +110,36 @@ pruneIO t = newIORef Set.empty >>= flip clipIO t
 clipIO :: IORef (Set Vertex) -> Tree Vertex -> IO (Tree Vertex)
 clipIO visitedRef (Node l xs) = do
   modifyIORef visitedRef (Set.insert l)
-  visited <- readIORef visitedRef
-  let unvistedNodes = filter (\(Node l' _) -> l' `Set.notMember` visited) xs
-  ns' <- mapM (clipIO visitedRef) unvistedNodes
-  return (Node l ns')
+  xs' <-
+    foldM
+      ( \z x@(Node l' _) ->
+          readIORef visitedRef >>= \visited ->
+            if l' `Set.notMember` visited
+              then clipIO visitedRef x <&> (: z)
+              else pure z
+      )
+      []
+      xs
+  pure $ Node l (reverse xs')
 
-g1, g2, g3 :: Graph
+g1, g2, g3, g4 :: Graph
 g1 = V.fromList [[1, 2], [], [3, 4], [], [0]]
 g2 = V.fromList [[1], [0]]
 g3 = V.fromList [[1], [2], [0]]
+g4 = V.fromList [[1, 2], [2], []]
 
 test :: IO ()
 test = hspec $
   forM_ [("foldr", prune), ("State monad", pruneState), ("ST monad", pruneST)] $ \(name, impl) ->
-    describe name $
+    describe name $ do
       it "should handle simple case" $ do
         dfs impl g1 0 `shouldBe` Node 0 [Node 1 [], Node 2 [Node 3 [], Node 4 []]]
         dfs impl g1 1 `shouldBe` Node 1 []
         dfs impl g1 2 `shouldBe` Node 2 [Node 3 [], Node 4 [Node 0 [Node 1 []]]]
         dfs impl g1 3 `shouldBe` Node 3 []
         dfs impl g1 4 `shouldBe` Node 4 [Node 0 [Node 1 [], Node 2 [Node 3 []]]]
+      it "should handle edge cases" $ do
+        dfs impl g4 0 `shouldBe` Node 0 [Node 1 [Node 2 []]]
 
 type AdjacencyMatrix = Vector (Vector Bool)
 
@@ -125,7 +150,7 @@ randomAdjacencyMatrix n p = V.fromList <$> replicateM n row
     row = V.fromList <$> replicateM n (bernoulli p)
 
 fromAdjacencyMatrix :: AdjacencyMatrix -> Graph
-fromAdjacencyMatrix mat = fmap findAll mat
+fromAdjacencyMatrix = fmap findAll
   where
     findAll xs = [i | (i, x) <- zip [0 ..] (V.toList xs), x]
 
