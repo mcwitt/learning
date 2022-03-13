@@ -16,6 +16,7 @@ pkgs.mkShell {
     in
     [
       ghcEnv
+      pkgs.haskellPackages.ormolu
       pkgs.haskell-language-server
     ];
 }
