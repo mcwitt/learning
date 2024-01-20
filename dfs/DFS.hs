@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -17,13 +18,16 @@ import Control.Monad.State
   )
 import Criterion.Main (bench, bgroup, defaultMain, nfIO)
 import Data.Functor ((<&>))
+import Data.HashTable.ST.Basic (HashTable)
+import Data.HashTable.ST.Basic qualified as H
 import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import Data.List (foldl')
+import Data.Maybe (isJust)
 import Data.STRef (STRef, modifySTRef, newSTRef, readSTRef)
 import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.Set qualified as Set
 import Data.Vector (Vector)
-import qualified Data.Vector as V
+import Data.Vector qualified as V
 import GHC.Generics (Generic)
 import System.Random.MWC.Probability
   ( Prob (sample),
@@ -73,54 +77,38 @@ clipState (Node l xs) = do
   modify (Set.insert l)
   xs' <-
     foldM
-      ( \z x@(Node l' _) ->
-          get >>= \visited ->
-            if l' `Set.notMember` visited
-              then clipState x <&> (: z)
-              else pure z
+      ( \z x@(Node l' _) -> do
+          visited <- get
+          if l' `Set.notMember` visited
+            then clipState x <&> (: z)
+            else pure z
       )
       []
       xs
   pure $ Node l (reverse xs')
 
 pruneST :: Tree Vertex -> Tree Vertex
-pruneST t = runST $ newSTRef Set.empty >>= flip clipST t
+pruneST t = runST $ H.new >>= flip clipST t
 
-clipST :: STRef s (Set Vertex) -> Tree Vertex -> ST s (Tree Vertex)
-clipST visitedRef (Node l xs) = do
-  modifySTRef visitedRef (Set.insert l)
+type HashSet s k = HashTable s k ()
+
+clipST :: HashSet s Vertex -> Tree Vertex -> ST s (Tree Vertex)
+clipST m (Node l xs) = do
+  insert l
   xs' <-
     foldM
-      ( \z x@(Node l' _) ->
-          readSTRef visitedRef >>= \visited ->
-            if l' `Set.notMember` visited
-              then clipST visitedRef x <&> (: z)
-              else pure z
+      ( \z x@(Node l' _) -> do
+          visited <- member l'
+          if visited
+            then pure z
+            else clipST m x <&> (: z)
       )
       []
       xs
   pure $ Node l (reverse xs')
-
-dfsIO :: (Tree Vertex -> IO (Tree Vertex)) -> Graph -> Vertex -> IO (Tree Vertex)
-dfsIO pruneImpl g = pruneImpl . generate g
-
-pruneIO :: Tree Vertex -> IO (Tree Vertex)
-pruneIO t = newIORef Set.empty >>= flip clipIO t
-
-clipIO :: IORef (Set Vertex) -> Tree Vertex -> IO (Tree Vertex)
-clipIO visitedRef (Node l xs) = do
-  modifyIORef visitedRef (Set.insert l)
-  xs' <-
-    foldM
-      ( \z x@(Node l' _) ->
-          readIORef visitedRef >>= \visited ->
-            if l' `Set.notMember` visited
-              then clipIO visitedRef x <&> (: z)
-              else pure z
-      )
-      []
-      xs
-  pure $ Node l (reverse xs')
+  where
+    insert k = H.insert m k ()
+    member k = isJust <$> H.lookup m k
 
 g1, g2, g3, g4 :: Graph
 g1 = V.fromList [[1, 2], [], [3, 4], [], [0]]
@@ -144,7 +132,7 @@ test = hspec $
 type AdjacencyMatrix = Vector (Vector Bool)
 
 randomAdjacencyMatrix ::
-  PrimMonad m => Int -> Double -> Prob m AdjacencyMatrix
+  (PrimMonad m) => Int -> Double -> Prob m AdjacencyMatrix
 randomAdjacencyMatrix n p = V.fromList <$> replicateM n row
   where
     row = V.fromList <$> replicateM n (bernoulli p)
@@ -154,7 +142,7 @@ fromAdjacencyMatrix = fmap findAll
   where
     findAll xs = [i | (i, x) <- zip [0 ..] (V.toList xs), x]
 
-randomGraph :: PrimMonad m => Int -> Double -> Prob m Graph
+randomGraph :: (PrimMonad m) => Int -> Double -> Prob m Graph
 randomGraph n = fmap fromAdjacencyMatrix . randomAdjacencyMatrix n
 
 runBench :: (Graph -> Vertex -> Tree Vertex) -> Int -> Double -> IO (Tree Vertex)
@@ -171,7 +159,6 @@ main =
         ( [ bench name . nfIO $ runBench (dfs impl) size p
             | (name, impl) <- [("foldr", prune), ("State monad", pruneState), ("ST monad", pruneST)]
           ]
-            ++ [bench "IO monad" . nfIO $ runBenchIO (dfsIO pruneIO) size p]
         )
       | size <- [100, 300],
         p <- [0.1, 0.3, 0.5]

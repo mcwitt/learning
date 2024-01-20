@@ -17,6 +17,8 @@ executable dfs-bench
     , containers
     , criterion
     , deepseq
+    , hashable
+    , hashtables
     , hspec
     , mtl
     , mwc-probability
